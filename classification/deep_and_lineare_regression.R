@@ -1,5 +1,6 @@
 library(gdalcubes)
 library(sf)
+library(parallel)
 library(rstac)
 library(randomForest)
 library(caret)
@@ -11,12 +12,14 @@ library(tensorflow)
 library(keras)
 
 
-gdalcubes_options(parallel = 8)
+# detect the number of CPU cores on the current host
+CORES <- parallel::detectCores()
+gdalcubes_options(parallel = CORES)
 
 # The data collection and processing is exactly the same as in the first example. 
 # Please look there for more information. 
 
-training_sites <- read_sf("/Users/jonasstarke/Desktop/train_dat.geojson")
+training_sites <- read_sf("./train_data/train_dat.geojson")
 
 assets <- c("B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B09", "B11", "SCL")
 
@@ -100,8 +103,8 @@ aoi_training <- raster_cube(s2_collection_aoi, cube_aoi) %>%
 # Load the CSV files. These have been created by ChatGPT and should add further arbitrary attributes to our geometry.
 # We have the geometry once as a list and once as GeoJSON for csv_data_01. 
 # Our function is able to handle both types in order to filter the geometry. 
-csv_data_01 <- read_csv("/Users/jonasstarke/Desktop/train_dat_extended.csv")
-csv_data <- read_csv("/Users/jonasstarke/Desktop/train_dat_geom.csv")
+csv_data_01 <- read_csv("./train_data/train_dat_extended.csv")
+csv_data <- read_csv("./train_data/train_dat_geom.csv")
 
 
 
