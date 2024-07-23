@@ -1,5 +1,6 @@
 library(gdalcubes)
 library(sf)
+library(parallel)
 library(rstac)
 library(randomForest)
 library(caret)
@@ -8,10 +9,12 @@ library(readr)
 library(terra)
 library(jsonlite)
 
-gdalcubes_options(parallel = 8)
+# detect the number of CPU cores on the current host
+CORES <- parallel::detectCores()
+gdalcubes_options(parallel = CORES)
 
 # Training data in GeoJSON format
-training_sites <- read_sf("/Users/jonasstarke/Desktop/train_dat.geojson")
+training_sites <- read_sf("./train_data/train_dat.geojson")
 assets <- c("B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B09", "B11", "SCL")
 
 bbox <- st_bbox(training_sites)
