@@ -1,0 +1,43 @@
+
+library(gdalcubes)
+# train rf and return the model
+ml_fit_class_random_forest <- function(training_set, target, num_trees = 100, max_variables=1, seed = NULL){
+
+}
+
+
+# train svm and return the model
+ml_fit_class_svm <- function(training_set, target, kernel="RBF", C = 1, gamma = 1, coef0 = 0, degree = 3, cachesize = 1000, tolerance = 0.001, seed = NULL){
+
+}
+
+
+# train xgboost and return the model
+ml_fit_class_svm <- function(training_set, target, learning_rate = 0.15, max_depth = 5, min_child_weight = 1, subsample = 0.8, min_split_loss = 1,  seed = NULL){
+
+}
+
+
+# ml predict
+ml_predict <- function(data, model, dimension = NULL){
+  tryCatch({
+    prediction <- gdalcubes::predict(aoi_cube, model)
+    print(prediction)
+    message("Prediction calculated ....")
+    message(gdalcubes::as_json(prediction))
+    
+    return(prediction)
+  },
+  error = function(e){
+    message("Error in classification")
+    message(conditionMessage(e))
+  })
+
+}
+
+
+# non openeo functions for training data preprocessing
+
+extract_values <- function (){
+
+}
