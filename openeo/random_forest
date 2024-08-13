@@ -1,27 +1,254 @@
-
 library(gdalcubes)
-# train rf and return the model
-ml_fit_class_random_forest <- function(training_set, target, num_trees = 100, max_variables=1, seed = NULL){
+library(sf)
+library(rstac)
+library(randomForest)
+library(caret)
+library(xgboost)
+library(readr)
+library(terra)
+library(jsonlite)
+library(stats)
 
+
+# train rf and return the model
+ml_fit_class_random_forest <- function(aot_cube, training_set, target_column, predictors, num_trees = 100, max_variables=1, seed = NULL) {
+  # Extracts the coordinate system (CRS) of the data cube
+  cube_crs <- gdalcubes::srs(aot_cube)
+  crs_data <- as.numeric(gsub("EPSG:", "", cube_crs))
+  
+  # Transforms the training data into the coordinate system of the data cube  
+  train_dat <- sf::st_transform(training_set, crs = crs_data)
+  print(train_dat)
+  
+  message("Combining training data with cube data . . . .")
+  
+  # Extracts the data from the data cube based on the geometries of the training data
+  extraction <- gdalcubes::extract_geom(
+    cube = aot_cube,
+    sf = train_dat
+  )
+  message("Trainingsdata extracted ....")
+  
+  if (nrow(extraction) == 0) {
+    stop("No data extracted. Check if the bounding boxes of the training data and the data cube overlap.")
+  }
+  print(extraction)
+  
+  # Merges the extracted data with the training data based on the IDs  
+  message("Now merging trainingsdata with aoi data ....")
+  train_dat$PolyID <- seq_len(nrow(train_dat))
+  print(train_dat)
+  extraction <- base::merge(extraction, train_dat, by.x = "FID", by.y = "PolyID")
+  print(extraction)
+  message("Extraction merged with trainingsdata ....")
+  
+  # Prepares the training data for model training
+  message("Now preparing the trainingdata for the modeltraining ....")
+  # Teilt die Daten in Trainings- und Testdatensätze
+  train_ids <- caret::createDataPartition(extraction$FID, p = 0.2, list = FALSE)
+  train_data <- extraction[train_ids, ]
+  train_data <- train_data[stats::complete.cases(train_data[, predictors]), ]
+  train_data <- base::as.data.frame(train_data)
+  message("Trainingdata prepared . . . .")
+  
+  # Ensures that the column names are correct and separates the data into predictors (x) and target variable (y)  
+  x <- train_data[, predictors]
+  y <- train_data[, target_column]
+  
+  
+  if (!is.null(seed)) {
+    set.seed(seed)
+  }
+  
+  if (!is.numeric(y)) {
+    y <- as.factor(y)
+  }
+  print(y)
+  
+  model <- randomForest::randomForest(
+    x = x,
+    y = y,
+    ntree = num_trees,
+    mtry = max_variables,
+    importance = TRUE
+  )
+  
+  predicted <- stats::predict(model, x)
+  accuracy <- sum(predicted == y) / length(y)
+  message("Model trained, accuracy: ", accuracy)
+  
+  return(model)
 }
 
 
 # train svm and return the model
-ml_fit_class_svm <- function(training_set, target, kernel="RBF", C = 1, gamma = 1, coef0 = 0, degree = 3, cachesize = 1000, tolerance = 0.001, seed = NULL){
+ml_fit_class_svm <- function(aot_cube, training_set, target_column, predictors, 
+  kernel = "radial", C = 1, sigma = 1, 
+  gamma = NULL, degree = 3, coef0 = 0, seed = NULL) {
 
+  # Extracts the coordinate system (CRS) of the data cube
+  cube_crs <- gdalcubes::srs(aot_cube)
+  crs_data <- as.numeric(gsub("EPSG:", "", cube_crs))
+
+  # Transforms the training data into the coordinate system of the data cube  
+  train_dat <- sf::st_transform(training_set, crs = crs_data)
+  message("Combining training data with cube data . . . .")
+
+  # Extracts the data from the data cube based on the geometries of the training data
+  extraction <- gdalcubes::extract_geom(cube = aot_cube, sf = train_dat)
+  message("Trainingsdata extracted ....")
+
+  if (nrow(extraction) == 0) {
+    stop("No data extracted. Check if the bounding boxes of the training data and the data cube overlap.")
+  }
+
+  message("Now merging trainingsdata with aoi data ....")
+  train_dat$PolyID <- seq_len(nrow(train_dat))
+  extraction <- base::merge(extraction, train_dat, by.x = "FID", by.y = "PolyID")
+  message("Extraction merged with trainingsdata ....")
+
+  message("Now preparing the trainingdata for the modeltraining ....")
+  train_ids <- caret::createDataPartition(extraction$FID, p = 0.8, list = FALSE)
+  train_data <- extraction[train_ids, ]
+  train_data <- train_data[stats::complete.cases(train_data[, predictors]), ]
+  train_data <- base::as.data.frame(train_data)
+
+  test_data <- extraction[-train_ids, ]
+  test_data <- test_data[stats::complete.cases(test_data[, predictors]), ]
+  test_data <- base::as.data.frame(test_data)
+
+  message("Trainingdata prepared . . . .")
+
+  x_train <- train_data[, predictors]
+  y_train <- train_data[, target_column]
+
+  if (!is.null(seed)) {
+    set.seed(seed)
+  }
+
+  if (!is.numeric(y_train)) {
+    y_train <- as.factor(y_train)
+  }
+
+  # Selection of the tune grid based on the kernel type
+  if (kernel == "radial") {
+  tune_grid <- base::expand.grid(C = C, sigma = sigma)
+  method <- "svmRadial"
+} else if (kernel == "linear") {
+  tune_grid <- base::expand.grid(C = C)
+  method <- "svmLinear"
+} else if (kernel == "polynomial") {
+  tune_grid <- base::expand.grid(C = C, degree = degree, scale = gamma, coef0 = coef0)
+  method <- "svmPoly"
+} else {
+  stop("Unsupported kernel type. Choose from 'radial', 'linear', or 'polynomial'.")
+}
+
+  train_control <- caret::trainControl(method = "repeatedcv", number = 10, repeats = 3)
+
+  svm_model <- caret::train(
+    x = x_train, 
+    y = y_train,
+    method = method,
+    tuneGrid = tune_grid,
+    trControl = train_control,
+    preProcess = c("center", "scale")
+  )
+
+  message("Model trained")  
+
+  # Return of the trained model
+  return(svm_model)
 }
 
 
 # train xgboost and return the model
-ml_fit_class_svm <- function(training_set, target, learning_rate = 0.15, max_depth = 5, min_child_weight = 1, subsample = 0.8, min_split_loss = 1,  seed = NULL){
-
+ml_fit_class_xgboost <- function(aot_cube, training_set, target_column, predictors, 
+                                 learning_rate = 0.15, max_depth = 5, min_child_weight = 1, 
+                                 subsample = 0.8, colsample_bytree = 1, min_split_loss = 1, 
+                                 nrounds = 100, seed = NULL) {
+  # Extracts the coordinate system (CRS) of the data cube
+  cube_crs <- gdalcubes::srs(aot_cube)
+  crs_data <- as.numeric(gsub("EPSG:", "", cube_crs))
+  
+  # Transforms the training data into the coordinate system of the data cube  
+  train_dat <- sf::st_transform(training_set, crs = crs_data)
+  print(train_dat)
+  
+  message("Combining training data with cube data . . . .")
+  
+  # Extracts the data from the data cube based on the geometries of the training data
+  extraction <- gdalcubes::extract_geom(
+    cube = aot_cube,
+    sf = train_dat
+  )
+  message("Trainingsdata extracted ....")
+  
+  if (nrow(extraction) == 0) {
+    stop("No data extracted. Check if the bounding boxes of the training data and the data cube overlap.")
+  }
+  print(extraction)
+  
+  # Merges the extracted data with the training data based on the IDs  
+  message("Now merging trainingsdata with aoi data ....")
+  train_dat$PolyID <- seq_len(nrow(train_dat))
+  print(train_dat)
+  extraction <- base::merge(extraction, train_dat, by.x = "FID", by.y = "PolyID")
+  print(extraction)
+  message("Extraction merged with trainingsdata ....")
+  
+  # Prepares the training data for model training
+  message("Now preparing the trainingdata for the modeltraining ....")
+  # Teilt die Daten in Trainings- und Testdatensätze
+  train_ids <- caret::createDataPartition(extraction$FID, p = 0.2, list = FALSE)
+  train_data <- extraction[train_ids, ]
+  train_data <- train_data[stats::complete.cases(train_data[, predictors]), ]
+  train_data <- base::as.data.frame(train_data)
+  message("Trainingdata prepared . . . .")
+  
+  # Ensures that the column names are correct and separates the data into predictors (x) and target variable (y)  
+  x <- train_data[, predictors]
+  y <- train_data[, target_column]
+  
+  
+  if (!is.null(seed)) {
+    set.seed(seed)
+  }
+  
+  if (!is.numeric(y)) {
+    y <- as.factor(y)
+  }
+  
+  # Sets the parameters for the xgboost model
+  tune_grid <- expand.grid(
+    nrounds = nrounds,
+    max_depth = max_depth,
+    eta = learning_rate,
+    gamma = min_split_loss,
+    colsample_bytree = colsample_bytree,
+    min_child_weight = min_child_weight,
+    subsample = subsample
+  )
+  
+  # Trains the xgboost model using caret
+  model <- caret::train(
+    x, y,
+    method = "xgbTree",
+    trControl = trainControl(method = "cv", number = 5, search = "grid"),
+    tuneGrid = tune_grid
+  )
+  
+  # Returns the trained model
+  message("Model trained.")
+  return(model)
 }
 
 
+
 # ml predict
-ml_predict <- function(data, model, dimension = NULL){
+ml_predict <- function(data_cube, model, dimension = NULL) {
   tryCatch({
-    prediction <- gdalcubes::predict(aoi_cube, model)
+    prediction <- predict(aoi_cube, model)
     print(prediction)
     message("Prediction calculated ....")
     message(gdalcubes::as_json(prediction))
@@ -32,12 +259,93 @@ ml_predict <- function(data, model, dimension = NULL){
     message("Error in classification")
     message(conditionMessage(e))
   })
-
 }
+
 
 
 # non openeo functions for training data preprocessing
-
-extract_values <- function (){
-
+extract_values <- function(bbox, crop_box, assets){
+  # STAC-Server URL
+  s <- rstac::stac("https://earth-search.aws.element84.com/v0")
+  
+  # Perform STAC search
+  items_training <- s |>
+    rstac::stac_search(collections = "sentinel-s2-l2a-cogs",
+                       bbox = c(bbox["xmin"], bbox["ymin"], bbox["xmax"], bbox["ymax"]), 
+                       datetime = "2021-06-01/2021-06-15") |>
+    rstac::post_request() |> rstac::items_fetch(progress = FALSE)
+  
+  # Number of elements found
+  length(items_training$features)
+  s2_collection_training <- gdalcubes::stac_image_collection(items_training$features, asset_names = assets, property_filter = function(x) {x[["eo:cloud_cover"]] < 20})
+  s2_collection_training
+  print(s2_collection_training)
+  
+  
+  # Define the bounding box based on the actual values of the data cube
+  cube <- gdalcubes::cube_view(extent = s2_collection_training, srs = "EPSG:25832", dx = 10, dy = 10, dt = "P1M",
+                                   aggregation = "median", resampling = "average")
+  
+  
+  # Create the data cube with the defined view
+  data_cube <- gdalcubes::raster_cube(s2_collection_training, cube) %>%
+    gdalcubes::select_bands(c("B02", "B03", "B04", "B08")) %>%
+    gdalcubes::crop(extent = list(left = crop_box["xmin"],
+                                  right = crop_box["xmax"],
+                                  bottom = crop_box["ymin"],
+                                  top = crop_box["ymax"],
+                                  t0 = "2021-06", t1 = "2021-06"),
+                    snap = "near")
+  data_cube
+  return(data_cube)
 }
+
+
+training_sites <- sf::read_sf("./train_data/train_dat.geojson")
+assets <- c("B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B09", "B11", "SCL")
+
+bbox <- sf::st_bbox(training_sites)
+# Define the bounding box for the training area
+aot_test <- sf::st_bbox(c(xmin = 388831.6, ymin = 5698900.1, xmax = 398063.3, ymax = 5718133.7), crs = sf::st_crs(25832))
+
+# Define the bounding box in EPSG:4326 The coordinates form a bounding box in which Paderborn is located
+aoi_target <- sf::st_bbox(c(xmin = 8.6638, ymin = 51.6612, xmax = 8.8410, ymax = 51.7815), crs = sf::st_crs(4326))
+
+# Conversion to an sf object
+bbox_target_sf <- sf::st_as_sfc(aoi_target)
+
+# Transform the coordinates to EPSG:25832
+bbox_target_transformed <- sf::st_transform(bbox_target_sf, crs = sf::st_crs(25832))
+
+# Extract the transformed coordinates
+bbox_target_utm <- sf::st_bbox(bbox_target_transformed)
+
+# Output of the transformed coordinates
+print(bbox_target_utm)
+
+predictors <- c("B02", "B03", "B04", "B08") 
+
+
+
+
+
+# call up functions
+aot_cube<- extract_values(bbox = bbox, crop_box = aot_test, assets = assets )
+aoi_cube <- extract_values(bbox = aoi_target, crop_box = bbox_target_utm, assets = assets)
+
+random_forest <- ml_fit_class_random_forest(aot_cube = aot_cube, training_set = training_sites,target_column = "Label", predictors = predictors)
+r_ml <- ml_predict(data_cube = aoi_cube, model = random_forest)
+prediction_raster_rf <- terra::rast(gdalcubes::write_tif(r_ml))
+plot(prediction_raster_rf)
+
+svm_classification <- ml_fit_class_svm(aot_cube = aot_cube, training_set = training_sites, target_column = "Label", predictors = predictors)
+s_ml <- ml_predict(data = aoi_cube, model = svm_classification)
+prediction_raster_svm <- terra::rast(gdalcubes::write_tif(s_ml))
+plot(prediction_raster_svm)
+
+xgboost_model <- ml_fit_class_xgboost(aot_cube = aot_cube, training_set = training_sites, target_column = "Label", predictors = predictors)
+xgboost_prediction <- ml_predict(data = aoi_cube, model = xgboost_model)
+xgboost_prediction_raster <- terra::rast(gdalcubes::write_tif(xgboost_prediction))
+plot(xgboost_prediction_raster)
+
+
