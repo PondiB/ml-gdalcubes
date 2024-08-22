@@ -8,50 +8,67 @@ library(readr)
 library(terra)
 library(jsonlite)
 library(stats)
+library(kernlab)
 
-
-# train rf and return the model
-ml_fit_class_random_forest <- function(aot_cube, training_set, target_column, predictors, num_trees = 100, max_variables=1, seed = NULL) {
-  # Extracts the coordinate system (CRS) of the data cube
+# Extracts the coordinate system (CRS) of the data cube
+extract_crs_datacube <- function(aot_cube){
   cube_crs <- gdalcubes::srs(aot_cube)
   crs_data <- as.numeric(gsub("EPSG:", "", cube_crs))
-  
-  # Transforms the training data into the coordinate system of the data cube  
-  train_dat <- sf::st_transform(training_set, crs = crs_data)
+  print(paste("CRS of the data cube:", crs_data))
+  return(crs_data)
+}
+
+# Transforms the training data into the coordinate system of the data cube  
+transform_training_data <- function(train_dat, aot_crs){
+  train_dat <- sf::st_transform(train_dat, crs = aot_crs)
+  print("Training data transformed:")
   print(train_dat)
-  
-  message("Combining training data with cube data . . . .")
-  
-  # Extracts the data from the data cube based on the geometries of the training data
+  return(train_dat)
+}
+
+# Combine cube data with the training data and then prepare for model training 
+data_preprocessing <- function(aot_cube, train_dat){
+  print("Starting data extraction...")
   extraction <- gdalcubes::extract_geom(
     cube = aot_cube,
     sf = train_dat
   )
-  message("Trainingsdata extracted ....")
+  print("Extraction result:")
+  print(extraction)
   
   if (nrow(extraction) == 0) {
     stop("No data extracted. Check if the bounding boxes of the training data and the data cube overlap.")
   }
-  print(extraction)
   
-  # Merges the extracted data with the training data based on the IDs  
-  message("Now merging trainingsdata with aoi data ....")
   train_dat$PolyID <- seq_len(nrow(train_dat))
-  print(train_dat)
   extraction <- base::merge(extraction, train_dat, by.x = "FID", by.y = "PolyID")
-  print(extraction)
-  message("Extraction merged with trainingsdata ....")
+  message("Extraction merged with training data ....")
   
-  # Prepares the training data for model training
-  message("Now preparing the trainingdata for the modeltraining ....")
-  # Teilt die Daten in Trainings- und Testdatensätze
   train_ids <- caret::createDataPartition(extraction$FID, p = 0.2, list = FALSE)
   train_data <- extraction[train_ids, ]
   train_data <- train_data[stats::complete.cases(train_data[, predictors]), ]
   train_data <- base::as.data.frame(train_data)
-  message("Trainingdata prepared . . . .")
-  
-  # Ensures that the column names are correct and separates the data into predictors (x) and target variable (y)  
+  message("Training data prepared . . . .")
+  return(train_data)
+}
+
+# if the data is not numerical, it will be changed
+numeric <- function(data){
+  if (!is.numeric(data)) {
+    data <- as.factor(data)
+  }
+  print(data)
+  return(data)
+}
+
+
+# train rf and return the model
+ml_fit_class_random_forest <- function(aot_cube, training_set, target_column, predictors, num_trees = 100, max_variables=1, seed = NULL) {
+  crs_data <- extract_crs_datacube(aot_cube = aot_cube)
+  train_dat <- transform_training_data(train_dat = training_set, aot_crs = crs_data)
+  message("Combining training data with cube data . . . .")
+  train_data <- data_preprocessing(aot_cube = aot_cube, train_dat = train_dat)
+
   x <- train_data[, predictors]
   y <- train_data[, target_column]
   
@@ -60,10 +77,7 @@ ml_fit_class_random_forest <- function(aot_cube, training_set, target_column, pr
     set.seed(seed)
   }
   
-  if (!is.numeric(y)) {
-    y <- as.factor(y)
-  }
-  print(y)
+  y <- numeric(data = y)
   
   model <- randomForest::randomForest(
     x = x,
@@ -72,11 +86,6 @@ ml_fit_class_random_forest <- function(aot_cube, training_set, target_column, pr
     mtry = max_variables,
     importance = TRUE
   )
-  
-  predicted <- stats::predict(model, x)
-  accuracy <- sum(predicted == y) / length(y)
-  message("Model trained, accuracy: ", accuracy)
-  
   return(model)
 }
 
@@ -85,50 +94,18 @@ ml_fit_class_random_forest <- function(aot_cube, training_set, target_column, pr
 ml_fit_class_svm <- function(aot_cube, training_set, target_column, predictors, 
   kernel = "radial", C = 1, sigma = 1, 
   gamma = NULL, degree = 3, coef0 = 0, seed = NULL) {
-
-  # Extracts the coordinate system (CRS) of the data cube
-  cube_crs <- gdalcubes::srs(aot_cube)
-  crs_data <- as.numeric(gsub("EPSG:", "", cube_crs))
-
-  # Transforms the training data into the coordinate system of the data cube  
-  train_dat <- sf::st_transform(training_set, crs = crs_data)
+  
+  crs_data <- extract_crs_datacube(aot_cube = aot_cube)
+  train_dat <- transform_training_data(train_dat = training_set, aot_crs = crs_data)
   message("Combining training data with cube data . . . .")
-
-  # Extracts the data from the data cube based on the geometries of the training data
-  extraction <- gdalcubes::extract_geom(cube = aot_cube, sf = train_dat)
-  message("Trainingsdata extracted ....")
-
-  if (nrow(extraction) == 0) {
-    stop("No data extracted. Check if the bounding boxes of the training data and the data cube overlap.")
-  }
-
-  message("Now merging trainingsdata with aoi data ....")
-  train_dat$PolyID <- seq_len(nrow(train_dat))
-  extraction <- base::merge(extraction, train_dat, by.x = "FID", by.y = "PolyID")
-  message("Extraction merged with trainingsdata ....")
-
-  message("Now preparing the trainingdata for the modeltraining ....")
-  train_ids <- caret::createDataPartition(extraction$FID, p = 0.8, list = FALSE)
-  train_data <- extraction[train_ids, ]
-  train_data <- train_data[stats::complete.cases(train_data[, predictors]), ]
-  train_data <- base::as.data.frame(train_data)
-
-  test_data <- extraction[-train_ids, ]
-  test_data <- test_data[stats::complete.cases(test_data[, predictors]), ]
-  test_data <- base::as.data.frame(test_data)
-
-  message("Trainingdata prepared . . . .")
-
-  x_train <- train_data[, predictors]
-  y_train <- train_data[, target_column]
-
+  train_data <- data_preprocessing(aot_cube = aot_cube, train_dat = train_dat)
+  
+  x <- train_data[, predictors]
+  y <- train_data[, target_column]
   if (!is.null(seed)) {
     set.seed(seed)
   }
-
-  if (!is.numeric(y_train)) {
-    y_train <- as.factor(y_train)
-  }
+  y <- numeric(data = y)
 
   # Selection of the tune grid based on the kernel type
   if (kernel == "radial") {
@@ -147,8 +124,8 @@ ml_fit_class_svm <- function(aot_cube, training_set, target_column, predictors,
   train_control <- caret::trainControl(method = "repeatedcv", number = 10, repeats = 3)
 
   svm_model <- caret::train(
-    x = x_train, 
-    y = y_train,
+    x = x, 
+    y = y,
     method = method,
     tuneGrid = tune_grid,
     trControl = train_control,
@@ -167,57 +144,18 @@ ml_fit_class_xgboost <- function(aot_cube, training_set, target_column, predicto
                                  learning_rate = 0.15, max_depth = 5, min_child_weight = 1, 
                                  subsample = 0.8, colsample_bytree = 1, min_split_loss = 1, 
                                  nrounds = 100, seed = NULL) {
-  # Extracts the coordinate system (CRS) of the data cube
-  cube_crs <- gdalcubes::srs(aot_cube)
-  crs_data <- as.numeric(gsub("EPSG:", "", cube_crs))
-  
-  # Transforms the training data into the coordinate system of the data cube  
-  train_dat <- sf::st_transform(training_set, crs = crs_data)
-  print(train_dat)
-  
+
+  crs_data <- extract_crs_datacube(aot_cube = aot_cube)
+  train_dat <- transform_training_data(train_dat = training_set, aot_crs = crs_data)
   message("Combining training data with cube data . . . .")
+  train_data <- data_preprocessing(aot_cube = aot_cube, train_dat = train_dat)
   
-  # Extracts the data from the data cube based on the geometries of the training data
-  extraction <- gdalcubes::extract_geom(
-    cube = aot_cube,
-    sf = train_dat
-  )
-  message("Trainingsdata extracted ....")
-  
-  if (nrow(extraction) == 0) {
-    stop("No data extracted. Check if the bounding boxes of the training data and the data cube overlap.")
-  }
-  print(extraction)
-  
-  # Merges the extracted data with the training data based on the IDs  
-  message("Now merging trainingsdata with aoi data ....")
-  train_dat$PolyID <- seq_len(nrow(train_dat))
-  print(train_dat)
-  extraction <- base::merge(extraction, train_dat, by.x = "FID", by.y = "PolyID")
-  print(extraction)
-  message("Extraction merged with trainingsdata ....")
-  
-  # Prepares the training data for model training
-  message("Now preparing the trainingdata for the modeltraining ....")
-  # Teilt die Daten in Trainings- und Testdatensätze
-  train_ids <- caret::createDataPartition(extraction$FID, p = 0.2, list = FALSE)
-  train_data <- extraction[train_ids, ]
-  train_data <- train_data[stats::complete.cases(train_data[, predictors]), ]
-  train_data <- base::as.data.frame(train_data)
-  message("Trainingdata prepared . . . .")
-  
-  # Ensures that the column names are correct and separates the data into predictors (x) and target variable (y)  
   x <- train_data[, predictors]
   y <- train_data[, target_column]
-  
-  
   if (!is.null(seed)) {
     set.seed(seed)
   }
-  
-  if (!is.numeric(y)) {
-    y <- as.factor(y)
-  }
+  y <- numeric(data = y)
   
   # Sets the parameters for the xgboost model
   tune_grid <- expand.grid(
@@ -319,9 +257,6 @@ bbox_target_transformed <- sf::st_transform(bbox_target_sf, crs = sf::st_crs(258
 
 # Extract the transformed coordinates
 bbox_target_utm <- sf::st_bbox(bbox_target_transformed)
-
-# Output of the transformed coordinates
-print(bbox_target_utm)
 
 predictors <- c("B02", "B03", "B04", "B08") 
 
